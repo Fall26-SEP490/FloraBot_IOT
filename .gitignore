@@ -1,0 +1,17 @@
+# PlatformIO build directories and cache
+.pio/
+.pioenvs/
+.piolibdeps/
+*.pyc
+
+# Local private configuration with actual credentials
+include/config.local.h
+
+# VS Code and IDE settings
+.vscode/
+.idea/
+*.sublime-*
+
+# OS files
+Thumbs.db
+.DS_Store
