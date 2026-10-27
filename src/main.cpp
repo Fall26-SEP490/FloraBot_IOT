@@ -9,11 +9,18 @@
  *   2. Nhận và giải mã lệnh mở hộc tủ (Unlock Command) theo chuẩn v1:
  *      - Xác thực chữ ký HMAC-SHA256 với khóa bí mật riêng của từng Kiosk.
  *      - Kiểm tra tính hợp lệ thời gian thực qua NTP (chống tấn công replay/hết hạn).
- *   3. Điều khiển Relay kích xung mở khóa điện từ Solenoid Lock (500ms).
- *   4. FreeRTOS Task giám sát và lọc nhiễu (debounce) cảm biến từ gắn cửa (Reed Switch).
+ *   3. Điều khiển độc lập 4 khóa điện từ qua relay, xung mở mặc định 500 ms.
+ *   4. FreeRTOS Task giám sát 4 cảm biến cửa MC-38 và lọc nhiễu 40 ms.
  *   5. Gửi sự kiện có chữ ký về Backend: ACK, OPENED, CLOSED, HEARTBEAT (định kỳ 30s).
  *   6. Tuân thủ kiến trúc ADR 0021 (Durable Core) & ADR 0022 (ESP32 Application):
  *      Lưu vết trạng thái vào bộ nhớ flash NVS Journal để chống mất điện đột ngột.
+ *
+ * Ghi chú đấu dây: bảng chân mặc định nằm trong include/hardware.h:
+ *   Ô 1: relay D26 / cảm biến D27; ô 2: relay D14 / cảm biến D13.
+ *   Ô 3: relay D25 / cảm biến D32; ô 4: relay D33 / cảm biến D18.
+ * Mỗi cảm biến tiếp điểm khô nối giữa GPIO và GND, dùng INPUT_PULLUP.
+ * Không đưa nguồn khóa 12V vào GPIO. Các kênh relay 0..3 phải khớp Backend.
+ * Nếu có config.local.h, kiểm tra channels trong file đó vì nó được ưu tiên.
  * ============================================================================
  */
 
@@ -64,6 +71,7 @@ uint16_t inflightPacket = 0, acknowledgedPacket = 0;
 std::string inflightEvent, inflightPayload, commandTopic, eventTopic;
 uint8_t inflightRelay = 0;
 size_t eventCursor = 0;
+// Mỗi cửa có bộ đếm thời gian, cảm biến và journal riêng; cửa này mở không chặn cửa khác.
 std::array<uint32_t, config::channels.size()> cycleStarted{};
 struct Sensor { bool reading = false; bool closed = false; uint32_t changed = 0; };
 std::array<Sensor, config::channels.size()> sensors{};
@@ -100,12 +108,16 @@ bool commit(const std::string& key, const flora::Snapshot& snapshot) {
 
 bool loadJournal() {
   if (nvs_flash_init_partition("journal") != ESP_OK || !preferences.begin("florabot", false, "journal")) return false;
-  // Never silently discard claims from the earlier single-door storage layout or a changed relay set.
+  // Giữ nguyên dấu chống mở lặp khi nâng cấp từ 1/2 cửa lên 4 cửa.
+  // Nếu NVS đã ghi bộ kênh cũ, dừng để bảo trì/migrate có kiểm soát; không tự xóa flash.
   if (preferences.isKey("journal")) return false;
   uint64_t relayMask = 0;
   for (const auto& channel : config::channels) relayMask |= uint64_t{1} << channel.relayChannel;
   const bool initialized = preferences.getBool("initialized", false);
-  if (initialized && (!preferences.isKey("relays") || preferences.getULong64("relays") != relayMask)) return false;
+  if (initialized && (!preferences.isKey("relays") || preferences.getULong64("relays") != relayMask)) {
+    Serial.println("[NVS] Bo kenh relay da thay doi; can bao tri journal, khong tu xoa du lieu cu.");
+    return false;
+  }
   auto saved = std::unique_ptr<flora::Snapshot>(new (std::nothrow) flora::Snapshot{});
   if (!saved) return false;
   for (const auto& channel : config::channels) {
@@ -234,6 +246,7 @@ void startPulse(size_t index) {
   portEXIT_CRITICAL(&pulseMutex);
 }
 bool closedNow(const config::Channel& channel) {
+  // sensorClosedLow chỉ đảo cách hiểu đóng/mở, không thay đổi cách đấu GPIO-GND.
   return digitalRead(channel.sensorPin) == (channel.sensorClosedLow ? LOW : HIGH);
 }
 
@@ -263,6 +276,7 @@ void doorTask(void*) {
           if (sensors[i].closed && closedNow(channel) && journal->beginPulse(currentTime)) startPulse(i);
           else { stopPulse(i); journal->requireInspection(); }
         } else if (phase == flora::Phase::WaitingOpen && !sensors[i].closed) {
+          // Chỉ cảm biến thật mới xác nhận cửa mở; relay nhả không đồng nghĩa cửa đã mở.
           if (!journal->opened(uuid(), currentTime)) { stopPulse(i); journal->requireInspection(); }
         } else if (phase == flora::Phase::WaitingClose && sensors[i].closed) {
           if (journal->closed(uuid(), currentTime)) stopPulse(i);
@@ -372,7 +386,9 @@ void setup() {
     Serial.printf("  Slot %u (Relay Ch %u) -> Relay GPIO: %d, Sensor GPIO: %d\n",
                   static_cast<unsigned>(i + 1), channel.relayChannel, channel.relayPin, channel.sensorPin);
     digitalWrite(channel.relayPin, channel.relayActiveHigh ? LOW : HIGH); pinMode(channel.relayPin, OUTPUT);
-    pinMode(channel.sensorPin, channel.sensorClosedLow ? INPUT_PULLUP : INPUT_PULLDOWN);
+    // MC-38 tiếp điểm khô: hở mạch được kéo lên 3,3V, thông mạch kéo xuống GND.
+    // Luôn dùng PULLUP kể cả khi loại cảm biến có trạng thái cửa đóng là HIGH.
+    pinMode(channel.sensorPin, INPUT_PULLUP);
   }
   if (config::recoveryButtonPin >= 0) pinMode(config::recoveryButtonPin, INPUT_PULLUP);
   journalMutex = xSemaphoreCreateMutex();
