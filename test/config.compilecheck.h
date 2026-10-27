@@ -1,9 +1,10 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include "hardware.h"
 // Non-operational fixture, only for linking every hardware path. Never flash this target.
 namespace config {
-struct Channel { uint8_t relayChannel; int relayPin; int sensorPin; bool relayActiveHigh; bool sensorClosedLow; };
+using Channel = hardware::Channel;
 inline constexpr char hardwareId[] = "ESP32-COMPILE-CHECK";
 inline constexpr char wifiSsid[] = "compile-check-only";
 inline constexpr char wifiPassword[] = "not-a-real-password";
@@ -13,8 +14,9 @@ inline constexpr char mqttPassword[] = "not-a-real-password";
 inline constexpr char hmacKeyHex[] = "0000000000000000000000000000000000000000000000000000000000000000";
 inline constexpr char caCertificate[] = "-----BEGIN CERTIFICATE-----\nINVALID-COMPILE-FIXTURE\n-----END CERTIFICATE-----";
 inline constexpr char ntpServer[] = "pool.ntp.org";
-inline constexpr std::array<Channel, 2> channels{{{0, 26, 27, true, true}, {1, 32, 33, true, true}}};
-inline constexpr int recoveryButtonPin = 25;
+// Biên dịch đủ 4 cửa và đường xử lý nút bảo trì; chỉ là fixture, không được nạp.
+inline constexpr auto channels = hardware::channels;
+inline constexpr int recoveryButtonPin = 23;
 inline constexpr uint32_t pulseMs = 500;
 inline constexpr uint32_t sensorDebounceMs = 40;
 inline constexpr uint32_t doorTimeoutMs = 60000;
