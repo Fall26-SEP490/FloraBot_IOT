@@ -267,6 +267,10 @@ void doorTask(void*) {
         if (!doors.healthy()) { fatal = true; stopAllPulses(); break; }
         const auto& channel = config::channels[i];
         auto* journal = doors.door(channel.relayChannel);
+        if (journal->recoveryRequired() && sensors[i].closed && closedNow(channel)) {
+          journal->clearRecoveryAfterInspection(true);
+          Serial.printf("[Auto-Clear] Door %u recovery cleared (sensor closed).\n", channel.relayChannel);
+        }
         const auto phase = journal->snapshot().phase;
         if (journal->recoveryRequired() || phase == flora::Phase::Idle) continue;
         const auto currentTime = static_cast<int64_t>(time(nullptr));
@@ -385,7 +389,7 @@ void setup() {
     const auto& channel = config::channels[i];
     Serial.printf("  Slot %u (Relay Ch %u) -> Relay GPIO: %d, Sensor GPIO: %d\n",
                   static_cast<unsigned>(i + 1), channel.relayChannel, channel.relayPin, channel.sensorPin);
-    digitalWrite(channel.relayPin, channel.relayActiveHigh ? LOW : HIGH); pinMode(channel.relayPin, OUTPUT);
+    pinMode(channel.relayPin, OUTPUT); digitalWrite(channel.relayPin, channel.relayActiveHigh ? LOW : HIGH);
     // MC-38 tiếp điểm khô: hở mạch được kéo lên 3,3V, thông mạch kéo xuống GND.
     // Luôn dùng PULLUP kể cả khi loại cảm biến có trạng thái cửa đóng là HIGH.
     pinMode(channel.sensorPin, INPUT_PULLUP);

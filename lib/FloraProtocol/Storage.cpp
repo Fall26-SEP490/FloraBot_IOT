@@ -1,5 +1,7 @@
 #include "Storage.h"
 #include <limits>
+#include <memory>
+#include <new>
 
 namespace flora {
 namespace {
@@ -63,20 +65,21 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snapshot) {
   if (!data || size != encodedSize || data[0] != 'F' || data[1] != 'L' || data[2] != 'R' || data[3] != 'J') return false;
   Reader checksum{data + size - 4, 4};
   if (checksum.number(4) != crc(data, size - 4)) return false;
-  Snapshot candidate{};
+  auto candidate = std::unique_ptr<Snapshot>(new (std::nothrow) Snapshot{});
+  if (!candidate) return false;
   Reader reader{data, size - 4, 4};
-  candidate.version = reader.number(4); candidate.clockFloor = reader.timestamp();
-  candidate.eventCount = reader.number(1); candidate.active = reader.number(1);
-  candidate.phase = static_cast<Phase>(reader.number(1));
-  for (auto& claim : candidate.claims) {
+  candidate->version = reader.number(4); candidate->clockFloor = reader.timestamp();
+  candidate->eventCount = reader.number(1); candidate->active = reader.number(1);
+  candidate->phase = static_cast<Phase>(reader.number(1));
+  for (auto& claim : candidate->claims) {
     reader.copy(claim.id); reader.copy(claim.identity); claim.expires = reader.timestamp();
   }
-  for (auto& event : candidate.events) {
+  for (auto& event : candidate->events) {
     reader.copy(event.id); reader.copy(event.command); event.at = reader.timestamp();
     event.kind = static_cast<EventKind>(reader.number(1));
   }
-  if (!reader.ok || reader.position != size - 4 || !Journal::valid(candidate)) return false;
-  snapshot = candidate;
+  if (!reader.ok || reader.position != size - 4 || !Journal::valid(*candidate)) return false;
+  snapshot = *candidate;
   return true;
 }
 }  // namespace flora
