@@ -11,6 +11,41 @@ Module này chạy trên vi điều khiển **ESP32**, chịu trách nhiệm:
 
 ---
 
+## Thay bo ESP32 classic 38 chân
+
+Số chân 30/38 không quyết định loại chip. Profile `esp32dev` dùng cho **ESP32
+classic**, mặc định flash 4 MB; cần đọc đúng model và dung lượng flash trước khi
+nạp. Không dùng profile này cho ESP32-S3/C3 chỉ vì bo có 38 chân.
+
+Khi thay bo sau sự cố quá nhiệt, chỉ cắm USB vào bo mới, tháo toàn bộ relay,
+cảm biến và bo đế cũ trong lần kiểm tra Wi-Fi/MQTT đầu tiên. Cổng mặc định hiện
+là **COM6**; nếu Windows cấp cổng khác, truyền cùng cổng cho các script:
+
+```powershell
+.\test-chip.ps1 -Port COM6
+.\flash.ps1 -Port COM6
+.\monitor.ps1 -Port COM6
+```
+
+Wi-Fi, MQTT TLS và HMAC nằm trong `include/config.local.h` riêng tại máy.
+Nếu bo mới thay thế cùng kiosk, giữ định danh `hardwareId` và thông tin được cấp
+cho kiosk đó; không đổi sang MAC chip và không bật đồng thời hai bo cùng định
+danh. Việc đổi bo không cần đổi API backend nếu kiosk và thông tin MQTT vẫn giữ
+nguyên. Firmware giao tiếp thiết bị qua MQTT TLS 8883.
+
+Bảng GPIO trong `include/hardware.h` giữ nguyên trên bo classic 38 chân:
+relay **26, 14, 25, 33**; cảm biến **27, 13, 32, 18**. Đây là số **GPIO**, không
+phải vị trí chân thứ 26/14/... trên hàng header. Đối chiếu nhãn IO/GPIO in trên
+đúng bo. Cấu hình mặc định kích HIGH; chỉ nối relay sau khi xác minh cực tính,
+đầu vào tương thích logic 3,3 V và đường cấp nguồn. GPIO không nhận 5 V/12 V.
+
+Chờ log Wi-Fi kết nối, đồng bộ NTP và MQTT `SUBACK` để xác nhận kết nối thiết bị.
+`SUBACK` xác nhận broker nhận đăng ký; cần kiểm tra heartbeat ở backend riêng để
+xác nhận backend đã xử lý sự kiện. Khi chưa nối cảm biến, trạng thái cửa là mở
+và firmware chính từ chối lệnh kích khóa cho cửa đó.
+
+---
+
 ## 1. Danh sách thiết bị phần cứng sử dụng
 
 | STT | Tên thiết bị / Linh kiện | Thông số kỹ thuật | Vai trò trong hệ thống FloraBot |
