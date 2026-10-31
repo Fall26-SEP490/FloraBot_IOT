@@ -157,10 +157,13 @@ void setup() {
   pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_LED, LOW);
   for (size_t i = 0; i < NUM_CHANNELS; ++i) {
-    // Ghi mức tắt trước khi chuyển OUTPUT, hỗ trợ cả relay kích HIGH hoặc LOW.
+    // Arduino 3.x bỏ qua digitalWrite trước pinMode; dùng ESP-IDF để
+    // nạp mức tắt vào output latch trước khi bật ngõ ra.
+    gpio_set_level(static_cast<gpio_num_t>(CHANNELS[i].relayPin),
+                   CHANNELS[i].relayActiveHigh ? 0 : 1);
+    pinMode(CHANNELS[i].relayPin, OUTPUT);
     digitalWrite(CHANNELS[i].relayPin,
                  CHANNELS[i].relayActiveHigh ? LOW : HIGH);
-    pinMode(CHANNELS[i].relayPin, OUTPUT);
     // Cảm biến khô chỉ nối GPIO-GND: luôn PULLUP, kể cả khi đảo
     // sensorClosedLow.
     pinMode(CHANNELS[i].sensorPin, INPUT_PULLUP);

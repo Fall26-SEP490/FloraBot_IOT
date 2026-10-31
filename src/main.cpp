@@ -389,7 +389,11 @@ void setup() {
     const auto& channel = config::channels[i];
     Serial.printf("  Slot %u (Relay Ch %u) -> Relay GPIO: %d, Sensor GPIO: %d\n",
                   static_cast<unsigned>(i + 1), channel.relayChannel, channel.relayPin, channel.sensorPin);
-    pinMode(channel.relayPin, OUTPUT); digitalWrite(channel.relayPin, channel.relayActiveHigh ? LOW : HIGH);
+    // Arduino 3.x ignores digitalWrite before pinMode. Preload the output
+    // latch through ESP-IDF, then enable the output at the inactive level.
+    gpio_set_level(static_cast<gpio_num_t>(channel.relayPin), channel.relayActiveHigh ? 0 : 1);
+    pinMode(channel.relayPin, OUTPUT);
+    digitalWrite(channel.relayPin, channel.relayActiveHigh ? LOW : HIGH);
     // MC-38 tiếp điểm khô: hở mạch được kéo lên 3,3V, thông mạch kéo xuống GND.
     // Luôn dùng PULLUP kể cả khi loại cảm biến có trạng thái cửa đóng là HIGH.
     pinMode(channel.sensorPin, INPUT_PULLUP);
