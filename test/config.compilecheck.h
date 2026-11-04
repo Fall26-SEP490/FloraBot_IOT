@@ -16,8 +16,8 @@ inline constexpr char caCertificate[] = "-----BEGIN CERTIFICATE-----\nINVALID-CO
 inline constexpr char ntpServer[] = "pool.ntp.org";
 // Biên dịch đủ 4 cửa và đường xử lý nút bảo trì; chỉ là fixture, không được nạp.
 inline constexpr auto channels = hardware::channels;
-inline constexpr int recoveryButtonPin = 23;
-inline constexpr uint32_t pulseMs = 500;
+inline constexpr int recoveryButtonPin = 16; // GPIO23 dành cho LM393 ô 4.
+inline constexpr uint32_t pulseMs = hardware::pulseMs;
 inline constexpr uint32_t sensorDebounceMs = 40;
 inline constexpr uint32_t doorTimeoutMs = 60000;
 }  // namespace config

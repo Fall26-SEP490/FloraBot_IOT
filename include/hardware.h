@@ -25,8 +25,13 @@ inline constexpr std::array<Channel, 4> channels{{
     {3, 33, 18, true, true}, // Ô 4: IN4 = D33, cảm biến = D18 (thay D35 cũ).
 }};
 
+// LM393: chỉ báo vật cản, OUT LOW là phát hiện. Chỉ số là relay_channel 0..3.
+inline constexpr std::array<int, 4> flowerSensorPins{{21, 22, 19, 23}};
+inline constexpr uint32_t flowerStableMs = 1000;
+
 // Tránh GPIO12 vì là chân strapping; GPIO35 không có điện trở kéo lên nội.
 // Tham khảo: https://docs.espressif.com/projects/esp-idf/en/v5.1/esp32/api-reference/peripherals/gpio.html
-inline constexpr uint32_t pulseMs = 500;          // Chỉ kích xung, không giữ điện khóa liên tục.
+inline constexpr uint32_t maxPulseMs = 3000;     // Giới hạn cấp điện mỗi xung.
+inline constexpr uint32_t pulseMs = 3000;        // Giữ chốt thụt 3 giây, rồi ngắt.
 inline constexpr uint32_t sensorDebounceMs = 40; // Chỉ công nhận tín hiệu ổn định ít nhất 40 ms.
 }  // namespace hardware
