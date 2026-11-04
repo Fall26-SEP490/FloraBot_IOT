@@ -18,7 +18,7 @@ inline constexpr char ntpServer[] = "pool.ntp.org";
 // Điền đầy đủ thông tin kết nối bên trên trước khi chạy cùng Backend.
 inline constexpr auto channels = hardware::channels;
 inline constexpr int recoveryButtonPin = -1;
-inline constexpr uint32_t pulseMs = 500;
+inline constexpr uint32_t pulseMs = hardware::pulseMs;
 inline constexpr uint32_t sensorDebounceMs = 40;
 inline constexpr uint32_t doorTimeoutMs = 60000;
 }  // namespace config

@@ -178,10 +178,10 @@ Trước khi chạy hệ thống với Backend, nạp bản **Diagnostics** đ�
    *(Script tự động biên dịch, nạp vào ESP32 trên cổng COM6 và mở Serial Monitor 115200 baud).*
 
 2. Trong cửa sổ Serial Monitor:
-   - **Bấm nút `BOOT` trên bo ESP32**: Kích mở khóa Solenoid ngay lập tức (500ms).
+   - **Bấm nút `BOOT` trên bo ESP32**: Kích mở khóa Solenoid ngay lập tức (3000 ms).
    - Khi khởi động, tất cả relay ở trạng thái tắt; diagnostics không tự mở khóa.
-   - Nhấn phím **`1`**, **`2`**, **`3`**, **`4`**: Kích khóa Ô 1 / Ô 2 / Ô 3 / Ô 4 trong 500 ms.
-   - Nhấn phím **`a`**: Bật/tắt thử lần lượt bốn khóa, cách nhau 3 giây.
+   - Nhấn phím **`1`**, **`2`**, **`3`**, **`4`**: Kích khóa Ô 1 / Ô 2 / Ô 3 / Ô 4 trong 3000 ms.
+   - Nhấn phím **`a`**: Bật/tắt thử lần lượt bốn khóa, mỗi lần bắt đầu cách nhau 3,5 giây (3 giây cấp điện + 0,5 giây nghỉ).
    - Nhấn phím **`w`**: Quét danh sách các mạng Wi-Fi 2.4GHz xung quanh.
    - Nhấn phím **`s`**: Đọc trạng thái tất cả cảm biến cửa.
    - Đưa nam châm lại gần/tách xa từng cảm biến: log `DOOR CLOSED` / `DOOR OPENED` sau khi tín hiệu ổn định 40 ms. Trạng thái cửa mở không chứng minh khách đã lấy hoa.
@@ -189,7 +189,110 @@ Trước khi chạy hệ thống với Backend, nạp bản **Diagnostics** đ�
 
 ---
 
+### Thử 4 cảm biến vật cản LM393
+
+Diagnostics hỗ trợ **4 LM393**, mỗi ô một cảm biến, bên cạnh 4 khóa và 4 MC-38.
+Mỗi LM393 nối **VCC → 3V3**, **GND → GND**, còn OUT đi riêng theo bảng:
+
+| Ô | OUT của LM393 → GPIO / cọc trên đế |
+| :--- | :--- |
+| 1 | GPIO21 / D21 / P21 |
+| 2 | GPIO22 / D22 / P22 |
+| 3 | GPIO19 / D19 / P19 |
+| 4 | GPIO23 / D23 / P23 |
+
+Có thể chỉ lắp một LM393 để thử; các chân OUT còn lại để hở. Do dùng
+`INPUT_PULLUP`, các chân chưa cắm đọc HIGH, chương trình ghi rõ
+`KHONG PHAT HIEN VAT (HOAC CHUA CAM CAM BIEN)`, không tự xác nhận ô trống.
+Sau này lắp thêm đúng bảng chân là dùng được, không cần đổi số cảm biến trong code.
+Chia nguồn và GND qua đầu nối phù hợp; không nối chung các dây OUT. Trên đế
+terminal bắt vít, dùng đúng cọc tương ứng với chân ESP32; không mặc định nguồn
+trên đế là 3,3 V. Không cấp 12 V cho module hoặc đưa OUT 5 V vào GPIO.
+
+Nạp bản diagnostics và xem Serial 115200:
+
+```powershell
+.\flash-diagnostics.ps1 -Port COM6
+```
+
+Thay COM6 bằng cổng thực tế. Khi khởi động, từng LM393 báo `CHUA XAC DINH` cho đến
+khi tín hiệu của ô đó ổn định đủ **1 giây**. Mỗi ô có bộ lọc riêng; ô đang nhiễu
+không chặn cập nhật các ô khác. Log ghi số ô và GPIO, ví dụ:
+
+```text
+[LM393] O 1 | GPIO 21 | ON DINH 1000 ms: CO VAT tai vi tri dat hoa
+[LM393] O 2 | GPIO 22 | ON DINH 1000 ms: KHONG PHAT HIEN VAT (HOAC CHUA CAM CAM BIEN)
+```
+
+- **`i`**: xem OUT tức thời (`raw=LOW/HIGH`) và kết quả đã lọc của cả 4 LM393.
+- **`p`**: bật/tắt in trạng thái cả 4 LM393 mỗi 500 ms để chỉnh biến trở.
+- **`s`**: xem cả 4 MC-38 và 4 LM393; **`h`**: trợ giúp và sơ đồ nối.
+
+Mặc định OUT LOW là phát hiện vật. Nếu module thực tế ngược lại, đổi
+`LM393_DETECTED_LEVEL` trong `src/diagnostics.cpp` rồi nạp lại. Để thử tủ ngang
+15 cm: cố định cảm biến, đóng cửa khi ô trống, chỉnh biến trở để không nhận vách;
+đặt hoa khoảng 5 cm trước cảm biến và kiểm tra có phát hiện. Thử cả vị trí lệch
+và các loại giấy gói thực tế. Biến trở chỉnh độ nhạy, không đặt khoảng cách
+chính xác theo cm; code không thể phân biệt vách và hoa nếu OUT giống nhau.
+
+Đây là kiểm tra vật cản offline, không gửi MQTT hoặc xác nhận lấy hàng. Không
+dùng cảm biến cửa để chặn log LM393, để có thể thử riêng khi chưa lắp MC-38.
+OUT HIGH cũng có thể do dây OUT bị rút; `KHONG PHAT HIEN VAT` không xác nhận
+cảm biến còn kết nối. Các lệnh relay và BOOT vẫn hoạt động như diagnostics cũ.
+
+**Nếu OUT luôn LOW dù chỉnh biến trở:**
+
+1. Tắt nguồn trước khi đổi dây. Thử bo cảm biến rời khỏi vít kim loại/giá đỡ;
+   tránh đầu vít chạm chân linh kiện hoặc điểm hàn.
+2. Rút riêng dây OUT khỏi cọc của ô cần kiểm tra (ô 1 là GPIO21), giữ đầu dây
+   rời không chạm gì. Cấp nguồn lại, nhấn `i`: với `INPUT_PULLUP`, chân để hở phải
+   đọc HIGH. Nếu vẫn LOW, kiểm tra đúng cọc theo bảng, dây chạm GND, đế hoặc
+   chân ESP32 trước khi chỉnh cảm biến.
+3. Nếu chân để hở đọc HIGH, tắt nguồn rồi nối lại OUT. Thử cảm biến hướng ra
+   vùng trống, tránh nắng trực tiếp; nhấn `p` và đối chiếu LED phát hiện với
+   `raw=LOW/HIGH`. Nếu LED thay đổi nhưng raw không đổi, kiểm tra dây OUT/cọc
+   nối. Nếu cả LED và OUT luôn kích hoạt, cần kiểm tra nguồn thực tế VCC-GND,
+   biến trở và module; chưa thể kết luận cảm biến hỏng chỉ từ log LOW.
+4. Không đảo `LM393_DETECTED_LEVEL` chỉ để che OUT bị kẹt. Không đổi sang nguồn
+   5 V khi OUT vẫn nối trực tiếp GPIO; phải xử lý mức logic phù hợp trước.
+
 ## 6. Cấu hình & Chạy chính thức với FloraBot Backend
+
+Main hỗ trợ **4 LM393** theo cùng bảng OUT của diagnostics: ô 1..4 lần lượt
+**GPIO21, GPIO22, GPIO19, GPIO23**, VCC 3V3 và GND chung. Bảng chân dùng chung
+ở `include/hardware.h` (`flowerSensorPins`), không phải sửa thêm mật khẩu hay
+thông tin thiết bị trong `config.local.h`. Main kiểm tra trùng chân relay,
+MC-38, LM393 và nút bảo trì trước khi bật phần cứng. GPIO23 không còn dùng
+đồng thời làm nút bảo trì; cấu hình compile-check dùng GPIO16 cho nút này.
+
+Task cảm biến lấy mẫu cả khi Wi-Fi/MQTT mất kết nối. Với cửa đóng, tín hiệu
+phải ổn định **1 giây** mới báo có/không có hoa; cửa đang mở hoặc tín hiệu đang
+đổi là **chưa xác định**. HIGH cũng có thể do chưa lắp cảm biến. Serial tự báo
+thay đổi từng ô, ví dụ `[LM393] O 1 | GPIO 21 | CO HOA (PHAT HIEN VAT)`.
+
+Main gửi snapshot `FLOWER_PRESENCE` có chữ ký HMAC qua MQTT QoS 1 trên topic
+`kiosk/{hardwareId}/evt`, khi đổi trạng thái, kết nối lại và định kỳ 15 giây.
+Thứ tự `states` là relay 0..3; -1 chưa xác định, 0 chưa phát hiện, 1 có vật.
+`occurred_at` của snapshot này dùng Unix mili giây; miền chữ ký riêng
+`florabot.flower.v1` được mô tả trong ADR 0056 của BE. Bản tin cửa hiện tại
+vẫn giữ giao thức cũ. LM393 chưa tự thay đổi tồn kho hoặc xác nhận lấy hàng.
+
+Để xem trên web cần cập nhật BE/FE cùng tính năng và áp dụng migration
+`20261104_flower_presence.sql` của BE theo quy trình triển khai. Web có mục
+**Cảm biến hoa trong tủ** ở tủ của seller, chi tiết ô admin và kho tủ khả dụng
+của manager. Web hiện Có hoa / Không có hoa / Chưa xác định; dữ liệu cũ quá
+45 giây hoặc kiosk offline không được coi là trạng thái hiện tại.
+
+Thời gian kích relay mặc định là **3000 ms (3 giây)** cho cả diagnostics và
+firmware chính. `include/hardware.h` đặt thời gian chung và giới hạn tối đa
+3000 ms; `config.example.h` và fixture compile-check dùng cùng giá trị này.
+Cấu hình riêng `config.local.h` được ưu tiên: khi nâng cấp máy khác, cần đổi
+`config::pulseMs` trong file đó thành 3000 hoặc `hardware::pulseMs` rồi nạp lại.
+Firmware chính vẫn ngắt sớm khi đóng xong cửa, có lỗi hoặc cần kiểm tra tại chỗ;
+3 giây là thời hạn tối đa của xung. Timer ngắt relay chạy độc lập với Wi-Fi/MQTT.
+Chỉ dùng xung 3 giây với khóa có thông số thời gian cấp điện phù hợp. Nguồn
+12 V–2 A không có đủ dự phòng cho ba khóa 0,6 A cùng ESP32, relay và cảm biến;
+cần tính dòng của khóa thực tế trước khi thử nhiều khóa cùng lúc.
 
 Sao chép [`include/config.example.h`](include/config.example.h) thành `include/config.local.h`, rồi điền thông số kết nối trong file riêng này:
 

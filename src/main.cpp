@@ -9,11 +9,13 @@
  *   2. Nhận và giải mã lệnh mở hộc tủ (Unlock Command) theo chuẩn v1:
  *      - Xác thực chữ ký HMAC-SHA256 với khóa bí mật riêng của từng Kiosk.
  *      - Kiểm tra tính hợp lệ thời gian thực qua NTP (chống tấn công replay/hết hạn).
- *   3. Điều khiển độc lập 4 khóa điện từ qua relay, xung mở mặc định 500 ms.
+ *   3. Điều khiển độc lập 4 khóa điện từ qua relay, xung mở mặc định 3000 ms.
  *   4. FreeRTOS Task giám sát 4 cảm biến cửa MC-38 và lọc nhiễu 40 ms.
  *   5. Gửi sự kiện có chữ ký về Backend: ACK, OPENED, CLOSED, HEARTBEAT (định kỳ 30s).
  *   6. Tuân thủ kiến trúc ADR 0021 (Durable Core) & ADR 0022 (ESP32 Application):
  *      Lưu vết trạng thái vào bộ nhớ flash NVS Journal để chống mất điện đột ngột.
+ *   7. LM393: OUT GPIO21/22/19/23, VCC 3V3, GND chung. Gửi snapshot có chữ ký
+ *      FLOWER_PRESENCE; không dùng tín hiệu này để hoàn tất đơn hoặc mở khóa.
  *
  * Ghi chú đấu dây: bảng chân mặc định nằm trong include/hardware.h:
  *   Ô 1: relay D26 / cảm biến D27; ô 2: relay D14 / cảm biến D13.
@@ -38,6 +40,7 @@
 #include <atomic>
 #include <memory>
 #include <new>
+#include <sys/time.h>
 #include "Journal.h"
 #include "DoorBank.h"
 #include "Storage.h"
@@ -75,6 +78,41 @@ size_t eventCursor = 0;
 std::array<uint32_t, config::channels.size()> cycleStarted{};
 struct Sensor { bool reading = false; bool closed = false; uint32_t changed = 0; };
 std::array<Sensor, config::channels.size()> sensors{};
+struct FlowerSensor { bool reading = false; int confirmed = -1; uint32_t changed = 0; };
+std::array<FlowerSensor, hardware::flowerSensorPins.size()> flowerSensors{};
+std::array<int, hardware::flowerSensorPins.size()> flowerStates{{-1, -1, -1, -1}};
+static_assert(hardware::flowerSensorPins.size() == 4, "Flower snapshot v1 needs four relay channels");
+uint32_t flowerRevision = 1, sentFlowerRevision = 0, lastFlowerSent = 0;
+constexpr uint32_t FLOWER_PUBLISH_MS = 15000;
+constexpr uint32_t FLOWER_MIN_PUBLISH_MS = 1000;
+
+// Cùng task cảm biến cửa, tiếp tục lấy mẫu khi Wi-Fi/TLS đang kết nối lại.
+// Gọi trong journalMutex; không ghi thêm NVS cho dữ liệu quan sát.
+void pollFlowerSensors(uint32_t now) {
+  for (size_t relay = 0; relay < flowerSensors.size(); ++relay) {
+    auto &sensor = flowerSensors[relay];
+    const bool reading = digitalRead(hardware::flowerSensorPins[relay]) == LOW;
+    bool doorClosed = false;
+    for (size_t i = 0; i < config::channels.size(); ++i)
+      if (config::channels[i].relayChannel == relay)
+        doorClosed = sensors[i].closed && digitalRead(config::channels[i].sensorPin) ==
+            (config::channels[i].sensorClosedLow ? LOW : HIGH);
+    if (!doorClosed || reading != sensor.reading) {
+      sensor.reading = reading; sensor.changed = now;
+      if (!doorClosed) sensor.confirmed = -1;
+    }
+    if (doorClosed && static_cast<uint32_t>(now - sensor.changed) >= hardware::flowerStableMs)
+      sensor.confirmed = reading ? 1 : 0;
+    const int state = doorClosed && static_cast<uint32_t>(now - sensor.changed) >= hardware::flowerStableMs
+        ? sensor.confirmed : -1;
+    if (state != flowerStates[relay]) {
+      flowerStates[relay] = state; ++flowerRevision;
+      Serial.printf("[LM393] O %u | GPIO %d | %s\n", static_cast<unsigned>(relay + 1),
+                    hardware::flowerSensorPins[relay], state == 1 ? "CO HOA (PHAT HIEN VAT)"
+                    : state == 0 ? "KHONG CO HOA (HOAC CHUA CAM CAM BIEN)" : "CHUA XAC DINH (CUA MO/CHUA ON DINH)");
+    }
+  }
+}
 
 class Lock {
  public:
@@ -175,8 +213,9 @@ bool validConfiguration() {
     Serial.println("[Config Error] config::channels list is empty!");
     return false;
   }
-  if (config::pulseMs == 0 || config::pulseMs > 1000) {
-    Serial.printf("[Config Error] pulseMs must be 1..1000 ms (current: %u)\n", config::pulseMs);
+  if (config::pulseMs == 0 || config::pulseMs > hardware::maxPulseMs) {
+    Serial.printf("[Config Error] pulseMs must be 1..%u ms (current: %u)\n",
+                  hardware::maxPulseMs, config::pulseMs);
     return false;
   }
   if (config::sensorDebounceMs < 20) {
@@ -211,6 +250,15 @@ bool validConfiguration() {
     }
     pins[channel.relayPin] = pins[channel.sensorPin] = true;
     relays[channel.relayChannel] = true;
+  }
+  for (size_t relay = 0; relay < hardware::flowerSensorPins.size(); ++relay) {
+    const int pin = hardware::flowerSensorPins[relay];
+    if (!safePin(pin) || pins[pin] || !relays[relay]) {
+      Serial.printf("[Config Error] LM393 GPIO %d conflicts with hardware or relay %u is missing.\n",
+                    pin, static_cast<unsigned>(relay));
+      return false;
+    }
+    pins[pin] = true;
   }
   if (config::recoveryButtonPin != -1 && (!safePin(config::recoveryButtonPin) || pins[config::recoveryButtonPin])) {
     Serial.printf("[Config Error] recoveryButtonPin %d is invalid or conflicts with channel pins!\n", config::recoveryButtonPin);
@@ -262,6 +310,7 @@ void doorTask(void*) {
         if (reading != sensors[i].reading) { sensors[i].reading = reading; sensors[i].changed = tick; }
         if (static_cast<uint32_t>(tick - sensors[i].changed) >= config::sensorDebounceMs) sensors[i].closed = reading;
       }
+      pollFlowerSensors(tick);
       if (fatal || !doors.healthy()) { fatal = true; stopAllPulses(); }
       else for (size_t i = 0; i < config::channels.size(); ++i) {
         if (!doors.healthy()) { fatal = true; stopAllPulses(); break; }
@@ -346,6 +395,25 @@ std::string eventPayload(const std::string& id, const std::string& command, cons
   std::string result; serializeJson(json, result); return result;
 }
 
+std::string flowerPayload() {
+  std::array<int, 4> states;
+  { Lock lock; states = flowerStates; sentFlowerRevision = flowerRevision; }
+  timeval clock{}; gettimeofday(&clock, nullptr);
+  const int64_t at = static_cast<int64_t>(clock.tv_sec) * 1000 + clock.tv_usec / 1000;
+  const std::string id = uuid();
+  std::string canonical = std::string("florabot.flower.v1\n") + config::hardwareId + "\n" + id + "\n" + std::to_string(at);
+  for (int state : states) canonical += "\n" + std::to_string(state);
+  flora::Digest signature{};
+  if (!hmac(deviceKey, canonical, signature)) return {};
+  JsonDocument json;
+  json["version"] = 1; json["hardware_id"] = config::hardwareId; json["event_id"] = id;
+  json["event"] = "FLOWER_PRESENCE"; json["occurred_at"] = at;
+  auto values = json["states"].to<JsonArray>();
+  for (int state : states) values.add(state);
+  json["signature"] = flora::hex(signature);
+  std::string result; serializeJson(json, result); return result;
+}
+
 void publishNext() {
   if (inflightPacket) {
     if (acknowledgedPacket == inflightPacket) {
@@ -366,7 +434,14 @@ void publishNext() {
   } else if (static_cast<uint32_t>(millis() - lastHeartbeat) >= 30000 || lastHeartbeat == 0) {
     inflightEvent.clear(); lastHeartbeat = millis();
     inflightPayload = eventPayload(uuid(), "00000000-0000-0000-0000-000000000000", "HEARTBEAT", time(nullptr));
-  } else return;
+  } else {
+    bool changed;
+    { Lock lock; changed = flowerRevision != sentFlowerRevision; }
+    const uint32_t elapsed = millis() - lastFlowerSent;
+    if (lastFlowerSent != 0 && elapsed < FLOWER_PUBLISH_MS && (!changed || elapsed < FLOWER_MIN_PUBLISH_MS)) return;
+    inflightEvent.clear(); // Snapshot không phải sự kiện journal cần acknowledge.
+    inflightPayload = flowerPayload(); lastFlowerSent = millis();
+  }
   if (inflightPayload.empty()) { fatal = true; return; }
   inflightPacket = mqtt.reservePacketId(); sentAt = millis();
   if (!mqtt.publishQos1(eventTopic.c_str(), reinterpret_cast<const uint8_t*>(inflightPayload.data()), inflightPayload.size(), inflightPacket)) mqtt.disconnect();
@@ -384,6 +459,7 @@ void setup() {
     return;
   }
   Serial.printf("[INIT] Hardware ID   : %s\n", config::hardwareId);
+  Serial.printf("[INIT] Relay pulse   : %lu ms\n", static_cast<unsigned long>(config::pulseMs));
   Serial.printf("[INIT] Configured Doors: %u\n", static_cast<unsigned>(config::channels.size()));
   for (size_t i = 0; i < config::channels.size(); ++i) {
     const auto& channel = config::channels[i];
@@ -399,6 +475,13 @@ void setup() {
     pinMode(channel.sensorPin, INPUT_PULLUP);
   }
   if (config::recoveryButtonPin >= 0) pinMode(config::recoveryButtonPin, INPUT_PULLUP);
+  for (size_t i = 0; i < hardware::flowerSensorPins.size(); ++i) {
+    pinMode(hardware::flowerSensorPins[i], INPUT_PULLUP);
+    flowerSensors[i] = {digitalRead(hardware::flowerSensorPins[i]) == LOW, -1, millis()};
+    Serial.printf("[INIT] LM393 O %u: OUT GPIO %d, VCC 3V3, cho cua dong va on dinh 1000 ms.\n",
+                  static_cast<unsigned>(i + 1), hardware::flowerSensorPins[i]);
+  }
+  Serial.println("[LM393] HIGH cung co the do chua cam cam bien; khong tu xac nhan lay hang.");
   journalMutex = xSemaphoreCreateMutex();
   if (!journalMutex || !loadJournal()) { Serial.println("[FATAL] NVS unavailable or invalid; outputs remain off."); return; }
   esp_timer_create_args_t timer{}; timer.callback = pulseTick; timer.name = "relay-limit";
@@ -457,6 +540,7 @@ void loop() {
   if (!mqtt.connected()) {
     subscribed = false; subscriptionFailed = false; inflightPacket = acknowledgedPacket = 0;
     inflightEvent.clear(); inflightPayload.clear();
+    lastFlowerSent = 0; // Gửi snapshot mới sau mỗi lần kết nối lại.
     if (static_cast<uint32_t>(millis() - lastConnect) < 5000) { delay(10); return; }
     lastConnect = millis();
     const std::string clientId = std::string("esp32-") + config::hardwareId;
