@@ -21,8 +21,10 @@ bool validId(const std::array<char, 37>& id) {
 }  // namespace
 
 bool Journal::valid(const Snapshot& value) {
-  if (value.version != 1 || value.clockFloor < 0 || value.eventCount > value.events.size() ||
-      value.active >= value.claims.size() || static_cast<unsigned>(value.phase) > 3) return false;
+  if ((value.version != 1 && value.version != 2) || value.clockFloor < 0 ||
+      value.eventCount > value.events.size() || value.active >= value.claims.size() ||
+      static_cast<unsigned>(value.phase) > 3 || value.pulseCount > 2 ||
+      value.lastPulseAt < 0 || value.lastPulseAt > value.clockFloor) return false;
   for (size_t i = 0; i < value.claims.size(); ++i) {
     const auto& claim = value.claims[i];
     if (claim.expires == 0) continue;
@@ -80,6 +82,8 @@ ClaimResult Journal::claim(const Command& command, const Digest& verifiedIdentit
   next->claims[index].expires = command.expires;
   next->active = static_cast<uint8_t>(index);
   next->phase = Phase::Prepared;
+  next->pulseCount = 0;
+  next->lastPulseAt = 0;
   auto& event = next->events[next->eventCount++];
   copyId(event.id, ackId); copyId(event.command, command.id);
   event.at = now; event.kind = EventKind::Ack;
@@ -87,11 +91,39 @@ ClaimResult Journal::claim(const Command& command, const Digest& verifiedIdentit
 }
 
 bool Journal::beginPulse(int64_t now) {
-  if (!healthy_ || recovery_ || state_.phase != Phase::Prepared || now < state_.clockFloor ||
-      now >= state_.claims[state_.active].expires) return false;
+  if (!healthy_ || recovery_ || state_.phase != Phase::Prepared || state_.pulseCount >= 2 ||
+      now < state_.clockFloor || now >= state_.claims[state_.active].expires) return false;
   auto next = std::unique_ptr<Snapshot>(new (std::nothrow) Snapshot(state_));
   if (!next) return false;
-  next->phase = Phase::WaitingOpen; next->clockFloor = now;
+  next->phase = Phase::WaitingOpen;
+  next->clockFloor = now;
+  next->pulseCount = state_.pulseCount + 1;
+  next->lastPulseAt = now;
+  return save(*next);
+}
+
+bool Journal::prepareRetry(const RetryCommand& command, const Digest& verifiedIdentity,
+                           bool sensorClosed, int64_t now) {
+  if (!healthy_ || recovery_ || !sensorClosed || state_.phase != Phase::WaitingOpen ||
+      state_.pulseCount != 1) return false;
+  if (state_.active >= state_.claims.size()) return false;
+  const auto& activeClaim = state_.claims[state_.active];
+  if (activeClaim.expires == 0) return false;
+  if (now < state_.clockFloor || now >= activeClaim.expires) return false;
+  if (command.requested_at < state_.lastPulseAt ||
+      command.requested_at - state_.lastPulseAt < 30 || now - state_.lastPulseAt < 30) return false;
+
+  std::string canonicalPayload;
+  if (!canonical(command, canonicalPayload)) return false;
+  if (now < command.requested_at || now >= command.expires_at) return false;
+  if (normalized(command.cmd_id) != activeClaim.id.data()) return false;
+  Digest sigDigest{};
+  if (!decodeHex(command.signature, sigDigest) || sigDigest != verifiedIdentity) return false;
+
+  auto next = std::unique_ptr<Snapshot>(new (std::nothrow) Snapshot(state_));
+  if (!next) return false;
+  next->phase = Phase::Prepared;
+  next->clockFloor = now;
   return save(*next);
 }
 

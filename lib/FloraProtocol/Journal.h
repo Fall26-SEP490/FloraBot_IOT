@@ -20,13 +20,15 @@ struct Event {
   EventKind kind = EventKind::Ack;
 };
 struct Snapshot {
-  uint32_t version = 1;
+  uint32_t version = 2;
   int64_t clockFloor = 0;
   std::array<Claim, 32> claims{};
   std::array<Event, 16> events{};
   uint8_t eventCount = 0;
   uint8_t active = 0;
   Phase phase = Phase::Idle;
+  uint8_t pulseCount = 0;
+  int64_t lastPulseAt = 0;
 };
 
 // Commit must durably replace the entire snapshot before returning true (one NVS blob).
@@ -42,6 +44,8 @@ class Journal {
   ClaimResult claim(const Command& command, const Digest& verifiedIdentity,
                     const std::string& ackId, int64_t now);
   bool beginPulse(int64_t now);
+  bool prepareRetry(const RetryCommand& command, const Digest& verifiedIdentity,
+                    bool sensorClosed, int64_t now);
   bool opened(const std::string& eventId, int64_t now);
   bool closed(const std::string& eventId, int64_t now);
   bool acknowledge(const std::string& eventId);

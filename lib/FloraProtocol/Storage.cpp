@@ -43,12 +43,13 @@ struct Reader {
 }  // namespace
 
 std::vector<uint8_t> encodeSnapshot(const Snapshot& snapshot) {
-  if (!Journal::valid(snapshot)) return {};
+  if ((snapshot.version != 1 && snapshot.version != 2) || !Journal::valid(snapshot)) return {};
   std::vector<uint8_t> output{'F', 'L', 'R', 'J'};
   output.reserve(4096);
-  integer(output, snapshot.version, 4); integer(output, snapshot.clockFloor, 8);
+  integer(output, 2, 4); integer(output, snapshot.clockFloor, 8);
   integer(output, snapshot.eventCount, 1); integer(output, snapshot.active, 1);
   integer(output, static_cast<uint8_t>(snapshot.phase), 1);
+  integer(output, snapshot.pulseCount, 1); integer(output, snapshot.lastPulseAt, 8);
   for (const auto& claim : snapshot.claims) {
     bytes(output, claim.id); bytes(output, claim.identity); integer(output, claim.expires, 8);
   }
@@ -61,16 +62,43 @@ std::vector<uint8_t> encodeSnapshot(const Snapshot& snapshot) {
 }
 
 bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snapshot) {
-  constexpr size_t encodedSize = 19 + 32 * (37 + 32 + 8) + 16 * (37 + 37 + 8 + 1) + 4;
-  if (!data || size != encodedSize || data[0] != 'F' || data[1] != 'L' || data[2] != 'R' || data[3] != 'J') return false;
+  constexpr size_t v1Size = 19 + 32 * (37 + 32 + 8) + 16 * (37 + 37 + 8 + 1) + 4;
+  constexpr size_t v2Size = 28 + 32 * (37 + 32 + 8) + 16 * (37 + 37 + 8 + 1) + 4;
+  if (!data || (size != v1Size && size != v2Size) || data[0] != 'F' || data[1] != 'L' ||
+      data[2] != 'R' || data[3] != 'J') return false;
   Reader checksum{data + size - 4, 4};
   if (checksum.number(4) != crc(data, size - 4)) return false;
   auto candidate = std::unique_ptr<Snapshot>(new (std::nothrow) Snapshot{});
   if (!candidate) return false;
   Reader reader{data, size - 4, 4};
-  candidate->version = reader.number(4); candidate->clockFloor = reader.timestamp();
-  candidate->eventCount = reader.number(1); candidate->active = reader.number(1);
+  const uint32_t rawVersion = static_cast<uint32_t>(reader.number(4));
+  if (rawVersion == 1) {
+    if (size != v1Size) return false;
+  } else if (rawVersion == 2) {
+    if (size != v2Size) return false;
+  } else {
+    return false;
+  }
+  candidate->version = rawVersion;
+  candidate->clockFloor = reader.timestamp();
+  candidate->eventCount = static_cast<uint8_t>(reader.number(1));
+  candidate->active = static_cast<uint8_t>(reader.number(1));
   candidate->phase = static_cast<Phase>(reader.number(1));
+  if (rawVersion == 2) {
+    candidate->pulseCount = static_cast<uint8_t>(reader.number(1));
+    candidate->lastPulseAt = reader.timestamp();
+  } else {
+    // V1 legacy migration:
+    // Decode old V1 preserving claims/events/clockfloor/phase,
+    // infer conservative retries exhausted for active legacy snapshot, no erasure.
+    if (candidate->phase != Phase::Idle) {
+      candidate->pulseCount = 2;
+      candidate->lastPulseAt = candidate->clockFloor;
+    } else {
+      candidate->pulseCount = 0;
+      candidate->lastPulseAt = 0;
+    }
+  }
   for (auto& claim : candidate->claims) {
     reader.copy(claim.id); reader.copy(claim.identity); claim.expires = reader.timestamp();
   }
@@ -79,6 +107,7 @@ bool decodeSnapshot(const uint8_t* data, size_t size, Snapshot& snapshot) {
     event.kind = static_cast<EventKind>(reader.number(1));
   }
   if (!reader.ok || reader.position != size - 4 || !Journal::valid(*candidate)) return false;
+  candidate->version = 2;
   snapshot = *candidate;
   return true;
 }

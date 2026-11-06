@@ -330,7 +330,8 @@ void doorTask(void*) {
           else { stopPulse(i); journal->requireInspection(); }
         } else if (phase == flora::Phase::WaitingOpen && !sensors[i].closed) {
           // Chỉ cảm biến thật mới xác nhận cửa mở; relay nhả không đồng nghĩa cửa đã mở.
-          if (!journal->opened(uuid(), currentTime)) { stopPulse(i); journal->requireInspection(); }
+          stopPulse(i);
+          if (!journal->opened(uuid(), currentTime)) { journal->requireInspection(); }
         } else if (phase == flora::Phase::WaitingClose && sensors[i].closed) {
           if (journal->closed(uuid(), currentTime)) stopPulse(i);
           else { stopPulse(i); journal->requireInspection(); }
@@ -365,24 +366,59 @@ void onCommand(char* topic, uint8_t* payload, unsigned length) {
   if (!subscribed || fatal || !clockReady() || commandTopic != topic || length > 1024 ||
       (mqtt.incomingFlags() & 1) || ((mqtt.incomingFlags() >> 1) & 3) != 1) return;
   JsonDocument json;
-  if (deserializeJson(json, payload, length) || !json.is<JsonObject>() || json.size() != 9 ||
-      !json["version"].is<int>() || !json["relay_channel"].is<int>() ||
-      !json["issued_at"].is<int64_t>() || !json["expires_at"].is<int64_t>()) return;
-  flora::Command command;
-  command.version = json["version"].as<int>(); command.relay = json["relay_channel"].as<int>();
-  command.issued = json["issued_at"].as<int64_t>(); command.expires = json["expires_at"].as<int64_t>();
-  if (!textField(json["hardware_id"], command.hardware) || !textField(json["cmd_id"], command.id) ||
-      !textField(json["slot_id"], command.slot) || !textField(json["purpose"], command.purpose) ||
-      !textField(json["signature"], command.signature)) return;
-  flora::Digest identity{};
+  if (deserializeJson(json, payload, length) || !json.is<JsonObject>()) return;
+
   const auto currentTime = static_cast<int64_t>(time(nullptr));
-  if (!flora::verify(command, config::hardwareId, deviceKey, currentTime, hmac, identity)) return;
-  Lock lock;
-  for (size_t i = 0; i < config::channels.size(); ++i) {
-    if (config::channels[i].relayChannel != command.relay || !sensors[i].closed || !closedNow(config::channels[i])) continue;
-    const auto result = doors.claim(command, identity, uuid(), currentTime);
-    if (result == flora::ClaimResult::Accepted) cycleStarted[i] = millis();
-    return;
+
+  if (json.size() == 9) {
+    if (!json["version"].is<int>() || !json["relay_channel"].is<int>() ||
+        !json["issued_at"].is<int64_t>() || !json["expires_at"].is<int64_t>()) return;
+    flora::Command command;
+    command.version = json["version"].as<int>(); command.relay = json["relay_channel"].as<int>();
+    command.issued = json["issued_at"].as<int64_t>(); command.expires = json["expires_at"].as<int64_t>();
+    if (!textField(json["hardware_id"], command.hardware) || !textField(json["cmd_id"], command.id) ||
+        !textField(json["slot_id"], command.slot) || !textField(json["purpose"], command.purpose) ||
+        !textField(json["signature"], command.signature)) return;
+    flora::Digest identity{};
+    if (!flora::verify(command, config::hardwareId, deviceKey, currentTime, hmac, identity)) return;
+    Lock lock;
+    for (size_t i = 0; i < config::channels.size(); ++i) {
+      if (config::channels[i].relayChannel != command.relay || !sensors[i].closed || !closedNow(config::channels[i])) continue;
+      const auto result = doors.claim(command, identity, uuid(), currentTime);
+      if (result == flora::ClaimResult::Accepted) cycleStarted[i] = millis();
+      return;
+    }
+  } else if (json.size() == 7) {
+    if (!json["version"].is<int>() || !json["requested_at"].is<int64_t>() ||
+        !json["expires_at"].is<int64_t>()) return;
+    flora::RetryCommand retryCmd;
+    retryCmd.version = json["version"].as<int>();
+    retryCmd.requested_at = json["requested_at"].as<int64_t>();
+    retryCmd.expires_at = json["expires_at"].as<int64_t>();
+    if (!textField(json["hardware_id"], retryCmd.hardware) ||
+        !textField(json["request_id"], retryCmd.request_id) ||
+        !textField(json["cmd_id"], retryCmd.cmd_id) ||
+        !textField(json["signature"], retryCmd.signature)) return;
+    flora::Digest retryIdentity{};
+    if (!flora::verify(retryCmd, config::hardwareId, deviceKey, currentTime, hmac, retryIdentity)) return;
+    Lock lock;
+    std::string normCmdId = retryCmd.cmd_id;
+    for (char& c : normCmdId) if (c >= 'A' && c <= 'F') c += 'a' - 'A';
+    for (size_t i = 0; i < config::channels.size(); ++i) {
+      auto* journal = doors.door(config::channels[i].relayChannel);
+      if (!journal) continue;
+      const auto& snapshot = journal->snapshot();
+      if (snapshot.phase == flora::Phase::WaitingOpen && snapshot.active < snapshot.claims.size() &&
+          snapshot.claims[snapshot.active].expires != 0) {
+        std::string activeId = snapshot.claims[snapshot.active].id.data();
+        for (char& c : activeId) if (c >= 'A' && c <= 'F') c += 'a' - 'A';
+        if (activeId == normCmdId) {
+          const bool closedFlag = sensors[i].closed && closedNow(config::channels[i]);
+          doors.prepareRetry(retryCmd, retryIdentity, closedFlag, currentTime);
+          return;
+        }
+      }
+    }
   }
 }
 
