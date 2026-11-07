@@ -40,6 +40,27 @@ ClaimResult DoorBank::claim(const Command& command, const Digest& identity, cons
   return target->claim(command, identity, ackId, now);
 }
 
+bool DoorBank::prepareRetry(const RetryCommand& command, const Digest& identity, bool sensorClosed, int64_t now) {
+  if (!healthy()) return false;
+  for (const auto& entry : doors_) {
+    if (now < entry.journal->snapshot().clockFloor) return false;
+  }
+  std::string id = command.cmd_id;
+  for (char& c : id) if (c >= 'A' && c <= 'F') c += 'a' - 'A';
+  Journal* target = nullptr;
+  for (auto& entry : doors_) {
+    const auto& saved = entry.journal->snapshot();
+    if (saved.phase == Phase::WaitingOpen && saved.active < saved.claims.size() &&
+        saved.claims[saved.active].expires != 0 &&
+        saved.claims[saved.active].id.data() == id) {
+      target = entry.journal.get();
+      break;
+    }
+  }
+  if (!target) return false;
+  return target->prepareRetry(command, identity, sensorClosed, now);
+}
+
 bool DoorBank::nextEvent(size_t& cursor, Event& event, uint8_t& relay) const {
   if (!healthy()) return false;
   for (size_t offset = 0; offset < doors_.size(); ++offset) {

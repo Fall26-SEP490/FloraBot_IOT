@@ -10,6 +10,7 @@ class DoorBank {
   Journal* door(uint8_t relay);
   bool healthy() const;
   ClaimResult claim(const Command& command, const Digest& verifiedIdentity, const std::string& ackId, int64_t now);
+  bool prepareRetry(const RetryCommand& command, const Digest& verifiedIdentity, bool sensorClosed, int64_t now);
   bool nextEvent(size_t& cursor, Event& event, uint8_t& relay) const;
   bool acknowledge(uint8_t relay, const std::string& eventId);
 

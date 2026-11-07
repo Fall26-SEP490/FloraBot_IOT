@@ -65,6 +65,16 @@ bool canonical(const Command& c, std::string& output) {
   return true;
 }
 
+bool canonical(const RetryCommand& c, std::string& output) {
+  if (c.version != 1 || !hardwareId(c.hardware) || !uuid(c.request_id) || !uuid(c.cmd_id) ||
+      c.requested_at <= 0 || c.expires_at <= c.requested_at ||
+      (c.expires_at - c.requested_at) > 30) return false;
+  output = "florabot.retry.v1\n" + c.hardware + "\n" + lower(c.request_id) + "\n" +
+           lower(c.cmd_id) + "\n" + std::to_string(c.requested_at) + "\n" +
+           std::to_string(c.expires_at);
+  return true;
+}
+
 bool verify(const Command& command, const std::string& hardware, const Digest& key,
             int64_t now, Hmac hmac, Digest& identity) {
   std::string payload;
@@ -76,6 +86,20 @@ bool verify(const Command& command, const std::string& hardware, const Digest& k
   for (size_t i = 0; i < expected.size(); ++i) difference |= supplied[i] ^ expected[i];
   if (difference != 0) return false;
   // The verified HMAC binds every canonical field and is also the durable content identity.
+  identity = expected;
+  return true;
+}
+
+bool verify(const RetryCommand& command, const std::string& hardware, const Digest& key,
+            int64_t now, Hmac hmac, Digest& identity) {
+  std::string payload;
+  Digest supplied{}, expected{};
+  if (!hmac || command.hardware != hardware || now < command.requested_at ||
+      now >= command.expires_at || !canonical(command, payload) ||
+      !decodeHex(command.signature, supplied) || !hmac(key, payload, expected)) return false;
+  uint8_t difference = 0;
+  for (size_t i = 0; i < expected.size(); ++i) difference |= supplied[i] ^ expected[i];
+  if (difference != 0) return false;
   identity = expected;
   return true;
 }
