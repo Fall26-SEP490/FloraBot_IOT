@@ -6,7 +6,7 @@ Module này chạy trên vi điều khiển **ESP32**, chịu trách nhiệm:
 1. Kết nối Wi-Fi và giao tiếp thời gian thực với **FloraBot Backend** qua giao thức **MQTT TLS** (Port 8883, QoS 1).
 2. Điều khiển đóng/ngắt các rơ-le (Relay) kích xung mở khóa điện từ (Solenoid Lock 12V) cho từng ô hộc tủ hoa.
 3. Giám sát trạng thái cảm biến từ gắn cửa (Magnetic Reed Switch) để phát hiện chính xác thời điểm cửa mở và cửa đóng.
-4. Gửi tín hiệu nhịp tim sống (Heartbeat) định kỳ 30 giây để cập nhật trạng thái `ONLINE` của Kiosk trên hệ thống quản trị.
+4. Gửi Heartbeat ngay sau mỗi lần kết nối MQTT và nhận SUBACK, ưu tiên trước sự kiện journal đang chờ; sau đó gửi định kỳ 30 giây để cập nhật trạng thái `ONLINE`. Đồng bộ NTP bắt đầu khi Wi-Fi đã kết nối. Log `[HEARTBEAT]` cho biết thời gian gửi từ lúc khởi động và PUBACK của broker; PUBACK không xác nhận BE đã xử lý. Thiết bị vẫn chờ giờ đồng bộ, TLS và HMAC hợp lệ trước khi gửi.
 5. Xác thực an toàn bảo mật cấp công nghiệp: chữ ký điện tử **HMAC-SHA256** chống giả mạo lệnh, lưu vết trạng thái chống mất điện vào bộ nhớ flash **NVS Journal (ADR 0021 & ADR 0022)**.
 
 ---
@@ -40,6 +40,9 @@ phải vị trí chân thứ 26/14/... trên hàng header. Đối chiếu nhãn 
 đầu vào tương thích logic 3,3 V và đường cấp nguồn. GPIO không nhận 5 V/12 V.
 
 Chờ log Wi-Fi kết nối, đồng bộ NTP và MQTT `SUBACK` để xác nhận kết nối thiết bị.
+NTP dùng máy chủ trong cấu hình, với `time.cloudflare.com` và `0.pool.ntp.org`
+làm dự phòng. Nếu chỉ có log Wi-Fi mà chưa có log NTP/MQTT, kiểm tra DNS và
+kết nối UDP 123 trên mạng của ESP32; thiết bị chưa gửi heartbeat khi chưa đồng bộ giờ.
 `SUBACK` xác nhận broker nhận đăng ký; cần kiểm tra heartbeat ở backend riêng để
 xác nhận backend đã xử lý sự kiện. Khi chưa nối cảm biến, trạng thái cửa là mở
 và firmware chính từ chối lệnh kích khóa cho cửa đó.

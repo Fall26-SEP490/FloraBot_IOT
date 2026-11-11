@@ -69,6 +69,7 @@ std::array<Pulse, config::channels.size()> pulses{};
 std::atomic<bool> synced{false}, fatal{false};
 std::atomic<uint32_t> lastSync{0};
 bool configured = false, subscribed = false, subscriptionFailed = false;
+bool connectionAttempted = false, heartbeatPending = true, inflightHeartbeat = false;
 uint32_t lastConnect = 0, lastHeartbeat = 0, sentAt = 0, subscribeAt = 0;
 uint16_t inflightPacket = 0, acknowledgedPacket = 0;
 std::string inflightEvent, inflightPayload, commandTopic, eventTopic;
@@ -453,23 +454,28 @@ std::string flowerPayload() {
 void publishNext() {
   if (inflightPacket) {
     if (acknowledgedPacket == inflightPacket) {
+      if (inflightHeartbeat) Serial.printf("[HEARTBEAT] Broker PUBACK at %lu ms (BE processing not confirmed).\n", static_cast<unsigned long>(millis()));
       if (!inflightEvent.empty()) { Lock lock; if (!doors.acknowledge(inflightRelay, inflightEvent)) fatal = true; }
-      inflightPacket = acknowledgedPacket = 0; inflightEvent.clear(); inflightPayload.clear();
+      inflightPacket = acknowledgedPacket = 0; inflightEvent.clear(); inflightPayload.clear(); inflightHeartbeat = false;
     } else if (static_cast<uint32_t>(millis() - sentAt) > 5000) mqtt.disconnect();
     return;
   }
+  // Send presence immediately after reconnect, even with a pending door journal.
+  // Journal events retain their existing relative order and durable ACK handling.
+  const bool heartbeatDue = heartbeatPending || static_cast<uint32_t>(millis() - lastHeartbeat) >= 30000;
   flora::Event pending{}; bool hasEvent = false;
-  {
+  if (!heartbeatDue) {
     Lock lock;
     hasEvent = doors.nextEvent(eventCursor, pending, inflightRelay);
   }
-  if (hasEvent) {
+  inflightHeartbeat = heartbeatDue;
+  if (heartbeatDue) {
+    inflightEvent.clear(); lastHeartbeat = millis(); heartbeatPending = false;
+    inflightPayload = eventPayload(uuid(), "00000000-0000-0000-0000-000000000000", "HEARTBEAT", time(nullptr));
+  } else if (hasEvent) {
     constexpr const char* names[] = {"ACK", "OPENED", "CLOSED"};
     inflightEvent = pending.id.data();
     inflightPayload = eventPayload(inflightEvent, pending.command.data(), names[static_cast<unsigned>(pending.kind)], pending.at);
-  } else if (static_cast<uint32_t>(millis() - lastHeartbeat) >= 30000 || lastHeartbeat == 0) {
-    inflightEvent.clear(); lastHeartbeat = millis();
-    inflightPayload = eventPayload(uuid(), "00000000-0000-0000-0000-000000000000", "HEARTBEAT", time(nullptr));
   } else {
     bool changed;
     { Lock lock; changed = flowerRevision != sentFlowerRevision; }
@@ -481,6 +487,7 @@ void publishNext() {
   if (inflightPayload.empty()) { fatal = true; return; }
   inflightPacket = mqtt.reservePacketId(); sentAt = millis();
   if (!mqtt.publishQos1(eventTopic.c_str(), reinterpret_cast<const uint8_t*>(inflightPayload.data()), inflightPayload.size(), inflightPacket)) mqtt.disconnect();
+  else if (inflightHeartbeat) Serial.printf("[HEARTBEAT] Sent at %lu ms since boot; awaiting broker PUBACK.\n", static_cast<unsigned long>(sentAt));
 }
 }  // namespace
 
@@ -540,8 +547,7 @@ void setup() {
   Serial.printf("[WiFi] Connecting to '%s'...\n", config::wifiSsid);
   WiFi.begin(config::wifiSsid, config::wifiPassword);
   sntp_set_time_sync_notification_cb(clockSynchronized);
-  Serial.printf("[NTP] Initializing time sync via '%s'...\n", config::ntpServer);
-  configTime(0, 0, config::ntpServer);
+  Serial.println("[NTP] Waiting for WiFi before starting time sync.");
   configured = true;
   Serial.println("[FloraBot] Firmware initialized; waiting for WiFi, trusted TLS and synchronized time.");
 }
@@ -557,6 +563,10 @@ void loop() {
     wasWiFiConnected = isWiFiConnected;
     if (isWiFiConnected) {
       Serial.printf("[WiFi] Connected! IP: %s | RSSI: %d dBm\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      if (!clockReady()) {
+        Serial.printf("[NTP] Starting time sync via '%s' at %lu ms...\n", config::ntpServer, static_cast<unsigned long>(millis()));
+        configTime(0, 0, config::ntpServer, "time.cloudflare.com", "0.pool.ntp.org");
+      }
     } else {
       Serial.println("[WiFi] Lost connection. Reconnecting...");
     }
@@ -575,13 +585,14 @@ void loop() {
 
   if (!mqtt.connected()) {
     subscribed = false; subscriptionFailed = false; inflightPacket = acknowledgedPacket = 0;
-    inflightEvent.clear(); inflightPayload.clear();
+    inflightEvent.clear(); inflightPayload.clear(); inflightHeartbeat = false;
     lastFlowerSent = 0; // Gửi snapshot mới sau mỗi lần kết nối lại.
-    if (static_cast<uint32_t>(millis() - lastConnect) < 5000) { delay(10); return; }
-    lastConnect = millis();
+    if (connectionAttempted && static_cast<uint32_t>(millis() - lastConnect) < 5000) { delay(10); return; }
+    lastConnect = millis(); connectionAttempted = true;
     const std::string clientId = std::string("esp32-") + config::hardwareId;
     Serial.printf("[MQTT] Connecting to broker %s:%d (Client: %s)...\n", config::mqttHost, config::mqttPort, clientId.c_str());
     if (mqtt.connect(clientId.c_str(), config::hardwareId, config::mqttPassword, nullptr, 0, false, nullptr, false)) {
+      heartbeatPending = true;
       Serial.printf("[MQTT] Connected! Subscribing to topic: %s\n", commandTopic.c_str());
       subscribeAt = millis();
       if (!mqtt.subscribe(commandTopic.c_str(), 1)) {
