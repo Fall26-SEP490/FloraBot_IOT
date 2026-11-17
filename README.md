@@ -277,14 +277,16 @@ Main gửi snapshot `FLOWER_PRESENCE` có chữ ký HMAC qua MQTT QoS 1 trên to
 `kiosk/{hardwareId}/evt`, khi đổi trạng thái, kết nối lại và định kỳ 15 giây.
 Thứ tự `states` là relay 0..3; -1 chưa xác định, 0 chưa phát hiện, 1 có vật.
 `occurred_at` của snapshot này dùng Unix mili giây; miền chữ ký riêng
-`florabot.flower.v1` được mô tả trong ADR 0056 của BE. Bản tin cửa hiện tại
-vẫn giữ giao thức cũ. LM393 chưa tự thay đổi tồn kho hoặc xác nhận lấy hàng.
+`florabot.flower.v2` ký thêm trạng thái MC-38 và kết quả lần thao tác cửa
+gần nhất. Sự kiện mở/đóng phục vụ nghiệp vụ vẫn giữ giao thức hiện tại.
 
-Để xem trên web cần cập nhật BE/FE cùng tính năng và áp dụng migration
-`20261104_flower_presence.sql` của BE theo quy trình triển khai. Web có mục
-**Cảm biến hoa trong tủ** ở tủ của seller, chi tiết ô admin và kho tủ khả dụng
-của manager. Web hiện Có hoa / Không có hoa / Chưa xác định; dữ liệu cũ quá
-45 giây hoặc kiosk offline không được coi là trạng thái hiện tại.
+Áp dụng migration `20261117_technician_door_telemetry.sql` và cập nhật backend
+trước khi nạp firmware v2. Backend mới tiếp tục đọc LM393 từ firmware v1.
+Sau khi cập nhật web hoặc mobile, đăng nhập Technical, chọn ca sửa được giao,
+mở **Sức khỏe thiết bị IoT** và chọn **Đọc lại tín hiệu** khi thử cửa bằng
+quy trình sửa chữa hiện tại. Dữ liệu quá 45 giây hoặc khi kiosk mất kết nối
+hiện là chưa xác định. Kết quả thao tác cửa được lưu trong RAM của ESP32,
+nên bắt đầu lại sau khi thiết bị khởi động. Bo mạch hiện chưa đo dòng qua khóa.
 
 Thời gian kích relay mặc định là **3000 ms (3 giây)** cho cả diagnostics và
 firmware chính. `include/hardware.h` đặt thời gian chung và giới hạn tối đa

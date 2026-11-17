@@ -82,10 +82,23 @@ std::array<Sensor, config::channels.size()> sensors{};
 struct FlowerSensor { bool reading = false; int confirmed = -1; uint32_t changed = 0; };
 std::array<FlowerSensor, hardware::flowerSensorPins.size()> flowerSensors{};
 std::array<int, hardware::flowerSensorPins.size()> flowerStates{{-1, -1, -1, -1}};
-static_assert(hardware::flowerSensorPins.size() == 4, "Flower snapshot v1 needs four relay channels");
+std::array<int, hardware::flowerSensorPins.size()> doorStates{{-1, -1, -1, -1}};
+enum class DoorCycle : int {
+  None = 0, RelayPulsed, OpenDetected, CloseDetected, OpenTimeout, CloseTimeout, InspectionRequired
+};
+std::array<DoorCycle, hardware::flowerSensorPins.size()> doorCycles{};
+std::array<int64_t, hardware::flowerSensorPins.size()> doorCycleTimes{};
+static_assert(hardware::flowerSensorPins.size() == 4, "Telemetry requires four relay channels");
 uint32_t flowerRevision = 1, sentFlowerRevision = 0, lastFlowerSent = 0;
 constexpr uint32_t FLOWER_PUBLISH_MS = 15000;
 constexpr uint32_t FLOWER_MIN_PUBLISH_MS = 1000;
+
+// Called by the door task with the journal lock held.
+void recordDoorCycle(uint8_t relay, DoorCycle state, int64_t at) {
+  doorCycles[relay] = state;
+  doorCycleTimes[relay] = at;
+  ++flowerRevision;
+}
 
 // Cùng task cảm biến cửa, tiếp tục lấy mẫu khi Wi-Fi/TLS đang kết nối lại.
 // Gọi trong journalMutex; không ghi thêm NVS cho dữ liệu quan sát.
@@ -307,9 +320,17 @@ void doorTask(void*) {
       Lock lock;
       const uint32_t tick = millis();
       for (size_t i = 0; i < sensors.size(); ++i) {
-        const bool reading = closedNow(config::channels[i]);
+        const auto& channel = config::channels[i];
+        const bool reading = closedNow(channel);
         if (reading != sensors[i].reading) { sensors[i].reading = reading; sensors[i].changed = tick; }
-        if (static_cast<uint32_t>(tick - sensors[i].changed) >= config::sensorDebounceMs) sensors[i].closed = reading;
+        if (static_cast<uint32_t>(tick - sensors[i].changed) >= config::sensorDebounceMs) {
+          sensors[i].closed = reading;
+          const int doorState = reading ? 1 : 0;
+          if (doorStates[channel.relayChannel] != doorState) {
+            doorStates[channel.relayChannel] = doorState;
+            ++flowerRevision;
+          }
+        }
       }
       pollFlowerSensors(tick);
       if (fatal || !doors.healthy()) { fatal = true; stopAllPulses(); }
@@ -324,18 +345,33 @@ void doorTask(void*) {
         const auto phase = journal->snapshot().phase;
         if (journal->recoveryRequired() || phase == flora::Phase::Idle) continue;
         const auto currentTime = static_cast<int64_t>(time(nullptr));
-        if (!clockReady() || static_cast<uint32_t>(tick - cycleStarted[i]) > config::doorTimeoutMs) {
+        const bool clockValid = clockReady();
+        if (!clockValid || static_cast<uint32_t>(tick - cycleStarted[i]) > config::doorTimeoutMs) {
+          const auto outcome = !clockValid ? DoorCycle::InspectionRequired
+              : phase == flora::Phase::WaitingOpen ? DoorCycle::OpenTimeout
+              : phase == flora::Phase::WaitingClose ? DoorCycle::CloseTimeout
+              : DoorCycle::InspectionRequired;
+          recordDoorCycle(channel.relayChannel, outcome, clockValid ? currentTime : 0);
           stopPulse(i); journal->requireInspection(); Serial.println("Door requires local inspection.");
         } else if (phase == flora::Phase::Prepared) {
-          if (sensors[i].closed && closedNow(channel) && journal->beginPulse(currentTime)) startPulse(i);
-          else { stopPulse(i); journal->requireInspection(); }
+          if (sensors[i].closed && closedNow(channel) && journal->beginPulse(currentTime)) {
+            startPulse(i);
+            recordDoorCycle(channel.relayChannel, DoorCycle::RelayPulsed, currentTime);
+          } else {
+            stopPulse(i); journal->requireInspection();
+            recordDoorCycle(channel.relayChannel, DoorCycle::InspectionRequired, currentTime);
+          }
         } else if (phase == flora::Phase::WaitingOpen && !sensors[i].closed) {
           // Chỉ cảm biến thật mới xác nhận cửa mở; relay nhả không đồng nghĩa cửa đã mở.
           stopPulse(i);
-          if (!journal->opened(uuid(), currentTime)) { journal->requireInspection(); }
+          const bool recorded = journal->opened(uuid(), currentTime);
+          if (!recorded) journal->requireInspection();
+          recordDoorCycle(channel.relayChannel, recorded ? DoorCycle::OpenDetected : DoorCycle::InspectionRequired, currentTime);
         } else if (phase == flora::Phase::WaitingClose && sensors[i].closed) {
-          if (journal->closed(uuid(), currentTime)) stopPulse(i);
-          else { stopPulse(i); journal->requireInspection(); }
+          const bool recorded = journal->closed(uuid(), currentTime);
+          stopPulse(i);
+          if (!recorded) journal->requireInspection();
+          recordDoorCycle(channel.relayChannel, recorded ? DoorCycle::CloseDetected : DoorCycle::InspectionRequired, currentTime);
         }
       }
       if (config::recoveryButtonPin >= 0 && digitalRead(config::recoveryButtonPin) == LOW) {
@@ -433,20 +469,41 @@ std::string eventPayload(const std::string& id, const std::string& command, cons
 }
 
 std::string flowerPayload() {
-  std::array<int, 4> states;
-  { Lock lock; states = flowerStates; sentFlowerRevision = flowerRevision; }
+  std::array<int, 4> states, contactStates;
+  std::array<DoorCycle, 4> cycles;
+  std::array<int64_t, 4> cycleTimes;
+  {
+    Lock lock;
+    states = flowerStates;
+    contactStates = doorStates;
+    cycles = doorCycles;
+    cycleTimes = doorCycleTimes;
+    sentFlowerRevision = flowerRevision;
+  }
   timeval clock{}; gettimeofday(&clock, nullptr);
   const int64_t at = static_cast<int64_t>(clock.tv_sec) * 1000 + clock.tv_usec / 1000;
   const std::string id = uuid();
-  std::string canonical = std::string("florabot.flower.v1\n") + config::hardwareId + "\n" + id + "\n" + std::to_string(at);
+  std::string canonical = std::string("florabot.flower.v2\n") + config::hardwareId + "\n" + id + "\n" + std::to_string(at);
   for (int state : states) canonical += "\n" + std::to_string(state);
+  for (int state : contactStates) canonical += "\n" + std::to_string(state);
+  for (auto cycle : cycles) canonical += "\n" + std::to_string(static_cast<int>(cycle));
+  for (auto& cycleTime : cycleTimes) {
+    if (cycleTime > at / 1000) cycleTime = 0;
+    canonical += "\n" + std::to_string(cycleTime);
+  }
   flora::Digest signature{};
   if (!hmac(deviceKey, canonical, signature)) return {};
   JsonDocument json;
-  json["version"] = 1; json["hardware_id"] = config::hardwareId; json["event_id"] = id;
+  json["version"] = 2; json["hardware_id"] = config::hardwareId; json["event_id"] = id;
   json["event"] = "FLOWER_PRESENCE"; json["occurred_at"] = at;
   auto values = json["states"].to<JsonArray>();
   for (int state : states) values.add(state);
+  auto contacts = json["door_states"].to<JsonArray>();
+  for (int state : contactStates) contacts.add(state);
+  auto results = json["door_cycles"].to<JsonArray>();
+  for (auto cycle : cycles) results.add(static_cast<int>(cycle));
+  auto times = json["door_cycle_times"].to<JsonArray>();
+  for (auto cycleTime : cycleTimes) times.add(cycleTime);
   json["signature"] = flora::hex(signature);
   std::string result; serializeJson(json, result); return result;
 }
@@ -516,6 +573,8 @@ void setup() {
     // MC-38 tiếp điểm khô: hở mạch được kéo lên 3,3V, thông mạch kéo xuống GND.
     // Luôn dùng PULLUP kể cả khi loại cảm biến có trạng thái cửa đóng là HIGH.
     pinMode(channel.sensorPin, INPUT_PULLUP);
+    sensors[i].reading = closedNow(channel);
+    sensors[i].changed = millis();
   }
   if (config::recoveryButtonPin >= 0) pinMode(config::recoveryButtonPin, INPUT_PULLUP);
   for (size_t i = 0; i < hardware::flowerSensorPins.size(); ++i) {
